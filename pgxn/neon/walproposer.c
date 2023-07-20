@@ -1394,7 +1394,11 @@ WalProposerRecovery(int donor, TimeLineID timeline, XLogRecPtr startpos, XLogRec
 	WalReceiverConn *wrconn;
 	WalRcvStreamOptions options;
 
+#if PG_MAJORVERSION_NUM < 16
 	wrconn = walrcv_connect(safekeeper[donor].conninfo, false, "wal_proposer_recovery", &err);
+#else
+	wrconn = walrcv_connect(safekeeper[donor].conninfo, false, true, "wal_proposer_recovery", &err);
+#endif
 	if (!wrconn)
 	{
 		ereport(WARNING,
