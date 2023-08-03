@@ -307,6 +307,26 @@ impl XlHeapUpdate {
     }
 }
 
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlHeapLock {
+    pub xmax: TransactionId,
+    pub offnum: OffsetNumber,
+    pub infobits_set: u8,
+    pub flags: u8,
+}
+
+impl XlHeapLock {
+    pub fn decode(buf: &mut Bytes) -> XlHeapLock {
+        XlHeapLock {
+            xmax: buf.get_u32_le(),
+            offnum: buf.get_u16_le(),
+            infobits_set: buf.get_u8(),
+            flags: buf.get_u8(),
+        }
+    }
+}
+
 ///
 /// Note: Parsing some fields is missing, because they're not needed.
 ///
