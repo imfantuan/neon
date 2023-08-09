@@ -42,7 +42,7 @@ use crate::tenant::remote_timeline_client::{self, index::LayerFileMetadata};
 use crate::tenant::storage_layer::delta_layer::DeltaEntry;
 use crate::tenant::storage_layer::{
     DeltaFileName, DeltaLayerWriter, ImageFileName, ImageLayerWriter, InMemoryLayer,
-    LayerAccessStats, LayerFileName, RemoteLayer,
+    LayerAccessStats, LayerE, LayerFileName, RemoteLayer,
 };
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
@@ -1607,7 +1607,8 @@ impl Timeline {
         // total size of layer files in the current timeline directory
         let mut total_physical_size = 0;
 
-        let mut loaded_layers = Vec::<Arc<dyn PersistentLayer>>::new();
+        let mut loaded_layers = Vec::new();
+        let this = self.myself.upgrade().expect("&self method holds the arc");
 
         for direntry in fs::read_dir(timeline_path)? {
             let direntry = direntry?;
@@ -1631,15 +1632,7 @@ impl Timeline {
                 let stats =
                     LayerAccessStats::for_loading_layer(&guard, LayerResidenceStatus::Resident);
 
-                let layer = ImageLayer::new(
-                    self.conf,
-                    self.timeline_id,
-                    self.tenant_id,
-                    &filename,
-                    file_size,
-                    stats,
-                );
-
+                let layer = LayerE::new(self.conf, &this, &filename.into(), file_size, stats);
                 total_physical_size += file_size;
                 loaded_layers.push(Arc::new(layer));
             } else if let Some(filename) = DeltaFileName::parse_str(&fname) {
@@ -1663,15 +1656,7 @@ impl Timeline {
                 let stats =
                     LayerAccessStats::for_loading_layer(&guard, LayerResidenceStatus::Resident);
 
-                let layer = DeltaLayer::new(
-                    self.conf,
-                    self.timeline_id,
-                    self.tenant_id,
-                    &filename,
-                    file_size,
-                    stats,
-                );
-
+                let layer = LayerE::new(self.conf, &this, &filename.into(), file_size, stats);
                 total_physical_size += file_size;
                 loaded_layers.push(Arc::new(layer));
             } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
@@ -1717,9 +1702,9 @@ impl Timeline {
     async fn create_remote_layers(
         &self,
         index_part: &IndexPart,
-        local_layers: HashMap<LayerFileName, Arc<dyn PersistentLayer>>,
+        local_layers: HashMap<LayerFileName, Arc<LayerE>>,
         up_to_date_disk_consistent_lsn: Lsn,
-    ) -> anyhow::Result<HashMap<LayerFileName, Arc<dyn PersistentLayer>>> {
+    ) -> anyhow::Result<HashMap<LayerFileName, Arc<LayerE>>> {
         // Are we missing some files that are present in remote storage?
         // Create RemoteLayer instances for them.
         let mut local_only_layers = local_layers;
@@ -1730,6 +1715,7 @@ impl Timeline {
 
         let mut corrupted_local_layers = Vec::new();
         let mut added_remote_layers = Vec::new();
+        let this = self.myself.upgrade().unwrap();
         for remote_layer_name in &index_part.timeline_layers {
             let local_layer = local_only_layers.remove(remote_layer_name);
 
@@ -1749,37 +1735,33 @@ impl Timeline {
             // If so, rename_to_backup those files & replace their local layer with
             // a RemoteLayer in the layer map so that we re-download them on-demand.
             if let Some(local_layer) = local_layer {
-                let local_layer_path = local_layer
-                    .local_path()
-                    .expect("caller must ensure that local_layers only contains local layers");
-                ensure!(
-                    local_layer_path.exists(),
-                    "every layer from local_layers must exist on disk: {}",
-                    local_layer_path.display()
-                );
+                // FIXME: I removed an exists check which was not try_exists
 
-                let remote_size = remote_layer_metadata.file_size();
-                let metadata = local_layer_path.metadata().with_context(|| {
-                    format!(
-                        "get file size of local layer {}",
-                        local_layer_path.display()
-                    )
+                let path = local_layer.local_path();
+
+                // FIXME: this could be async, but that'd be much more horrible
+                // FIXME: should just load local layers as ResidentLayer but we need something
+                // other than what the {Delta,Image}LayerWriters use
+                let needs_download = local_layer.needs_download_blocking().with_context(|| {
+                    format!("check if local layer needs downloading {}", path.display())
                 })?;
-                let local_size = metadata.len();
-                if local_size != remote_size {
-                    warn!("removing local file {local_layer_path:?} because it has unexpected length {local_size}; length in remote index is {remote_size}");
-                    if let Err(err) = rename_to_backup(&local_layer_path) {
-                        assert!(local_layer_path.exists(), "we would leave the local_layer without a file if this does not hold: {}", local_layer_path.display());
-                        anyhow::bail!("could not rename file {local_layer_path:?}: {err:?}");
-                    } else {
-                        self.metrics.resident_physical_size_gauge.sub(local_size);
-                        corrupted_local_layers.push(local_layer);
-                        // fall-through to adding the remote layer
+
+                if let Some(reason) = needs_download {
+                    warn!("removing local file {} because {reason}", path.display());
+                    if !reason.is_not_found() {
+                        if let Err(err) = rename_to_backup(&path) {
+                            assert!(path.exists(), "we would leave the local_layer without a file if this does not hold: {}", path.display());
+                            return Err(err.context("rename to backup"));
+                        } else if let Some(actual) = reason.actual_size() {
+                            self.metrics.resident_physical_size_gauge.sub(actual);
+                        }
                     }
+                    corrupted_local_layers.push(local_layer);
+                    // fall-through to adding the remote layer
                 } else {
                     debug!(
                         "layer is present locally and file size matches remote, using it: {}",
-                        local_layer_path.display()
+                        path.display()
                     );
                     continue;
                 }
@@ -1802,11 +1784,11 @@ impl Timeline {
                     let stats =
                         LayerAccessStats::for_loading_layer(&guard, LayerResidenceStatus::Evicted);
 
-                    let remote_layer = RemoteLayer::new_img(
-                        self.tenant_id,
-                        self.timeline_id,
-                        imgfilename,
-                        &remote_layer_metadata,
+                    let remote_layer = LayerE::new(
+                        self.conf,
+                        &this,
+                        remote_layer_name,
+                        remote_layer_metadata.file_size(),
                         stats,
                     );
                     let remote_layer = Arc::new(remote_layer);
@@ -1829,11 +1811,11 @@ impl Timeline {
                     let stats =
                         LayerAccessStats::for_loading_layer(&guard, LayerResidenceStatus::Evicted);
 
-                    let remote_layer = RemoteLayer::new_delta(
-                        self.tenant_id,
-                        self.timeline_id,
-                        deltafilename,
-                        &remote_layer_metadata,
+                    let remote_layer = LayerE::new(
+                        self.conf,
+                        &this,
+                        remote_layer_name,
+                        remote_layer_metadata.file_size(),
                         stats,
                     );
                     let remote_layer = Arc::new(remote_layer);
@@ -1841,7 +1823,7 @@ impl Timeline {
                 }
             }
         }
-        guard.initialize_remote_layers(corrupted_local_layers, added_remote_layers);
+        guard.initialize_remote_layers(added_remote_layers);
         Ok(local_only_layers)
     }
 
@@ -1906,18 +1888,17 @@ impl Timeline {
         if has_local_layers {
             // Are there local files that don't exist remotely? Schedule uploads for them.
             // Local timeline metadata will get uploaded to remove along witht he layers.
-            for (layer_name, layer) in &local_only_layers {
-                // XXX solve this in the type system
-                let layer_path = layer
-                    .local_path()
-                    .expect("local_only_layers only contains local layers");
-                let layer_size = layer_path
-                    .metadata()
-                    .with_context(|| format!("failed to get file {layer_path:?} metadata"))?
-                    .len();
-                info!("scheduling {layer_path:?} for upload");
+            for (_, layer) in &local_only_layers {
+                // FIXME: we could return the pair of these for resident layers from ctor (Arc<LayerE>,
+                // Arc<ResidentLayer>)
+                let layer = layer
+                    .guard_against_eviction(false)
+                    .await
+                    .expect("this should had been a local layer");
+                let layer_size = layer.layer_desc().file_size;
+                info!("scheduling {layer} for upload");
                 remote_client
-                    .schedule_layer_file_upload(layer_name, &LayerFileMetadata::new(layer_size))?;
+                    .schedule_layer_file_upload(layer, &LayerFileMetadata::new(layer_size))?;
             }
             remote_client.schedule_index_upload_for_file_changes()?;
         } else if index_part.is_none() {
@@ -3118,7 +3099,7 @@ impl Timeline {
         lsn: Lsn,
         force: bool,
         ctx: &RequestContext,
-    ) -> Result<HashMap<LayerFileName, LayerFileMetadata>, PageReconstructError> {
+    ) -> Result<HashMap<Arc<LayerE>, LayerFileMetadata>, PageReconstructError> {
         let timer = self.metrics.create_images_time_histo.start_timer();
         let mut image_layers: Vec<ImageLayer> = Vec::new();
 
