@@ -431,7 +431,8 @@ impl ImageLayerInner {
         let file = VirtualFile::open(path)
             .with_context(|| format!("Failed to open file '{}'", path.display()))?;
         let file = FileBlockReader::new(file);
-        let summary_blk = file.read_blk(0)?;
+        let block_cursor = file.block_cursor();
+        let summary_blk = block_cursor.read_blk(0)?;
         let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
 
         if let Some(mut expected_summary) = summary {
