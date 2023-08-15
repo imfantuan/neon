@@ -494,7 +494,7 @@ jobs:
   coverage-report:
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:5869703837
       options: --init
     needs: [ regress-tests ]
     strategy:
