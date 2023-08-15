@@ -506,19 +506,7 @@ jobs:
         uses: actions/checkout@v3
         with:
           submodules: true
-          fetch-depth: 1
-
-#      Disabled for now
-#      - name: Restore cargo deps cache
-#        id: cache_cargo
-#        uses: actions/cache@v3
-#        with:
-#          path: |
-#            ~/.cargo/registry/
-#            !~/.cargo/registry/src
-#            ~/.cargo/git/
-#            target/
-#          key: v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          fetch-depth: 0
 
       - name: Get Neon artifact
         uses: ./.github/actions/download
@@ -561,13 +549,40 @@ jobs:
           REPORT_URL=https://${BUCKET}.s3.amazonaws.com/code-coverage/${COMMIT_SHA}/index.html
           echo "report-url=${REPORT_URL}" >> $GITHUB_OUTPUT
 
+      - name: Build coverage report NEW
+        id: upload-coverage-report-new
+        env:
+          BUCKET: neon-github-public-dev
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          BASELINE="$(git merge-base HEAD origin/main)"
+          CURRENT="${COMMIT_SHA}"
+
+          aws s3 cp --only-show-errors s3://${BUCKET}/code-coverage/${BASELINE}/lcov.info ./${BASELINE}.info
+          cp /tmp/coverage/report/lcov.info ./${CURRENT}.info
+
+          git diff ${BASELINE} ${CURRENT} > baseline-current.diff
+
+          genhtml --ignore-errors unmapped,inconsistent,annotate,source,path --synthesize-missing \
+            --baseline-file ${BASELINE}.info \
+            --diff-file baseline-current.diff \
+            --output-directory lcov-html \
+            --demangle-cpp rustfilt \
+            ${CURRENT}.info
+
+          aws s3 cp --only-show-errors --recursive ./lcov-html/ s3://${BUCKET}/code-coverage/${COMMIT_SHA}/lcov
+
+          REPORT_URL=https://${BUCKET}.s3.amazonaws.com/code-coverage/${COMMIT_SHA}/lcov/index.html
+          echo "report-url=${REPORT_URL}" >> $GITHUB_OUTPUT
+
       - uses: actions/github-script@v6
         env:
           REPORT_URL: ${{ steps.upload-coverage-report.outputs.report-url }}
+          REPORT_URL_NEW: ${{ steps.upload-coverage-report-new.outputs.report-url }}
           COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         with:
           script: |
-            const { REPORT_URL, COMMIT_SHA } = process.env
+            const { REPORT_URL, REPORT_URL_NEW, COMMIT_SHA } = process.env
 
             await github.rest.repos.createCommitStatus({
               owner: context.repo.owner,
@@ -576,6 +591,15 @@ jobs:
               state: 'success',
               target_url: `${REPORT_URL}`,
               context: 'Code coverage report',
+            })
+
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: `${COMMIT_SHA}`,
+              state: 'success',
+              target_url: `${REPORT_URL_NEW}`,
+              context: 'Code coverage report NEW',
             })
 
   trigger-e2e-tests:
