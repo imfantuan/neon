@@ -33,6 +33,7 @@ use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirectio
 use crate::tenant::storage_layer::{
     LayerAccessStats, PersistentLayer, ValueReconstructResult, ValueReconstructState,
 };
+use crate::tenant::Timeline;
 use crate::virtual_file::VirtualFile;
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 use anyhow::{bail, ensure, Context, Result};
@@ -47,6 +48,7 @@ use std::io::{Seek, SeekFrom};
 use std::ops::Range;
 use std::os::unix::prelude::FileExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::sync::OnceCell;
 use tracing::*;
 
@@ -57,7 +59,10 @@ use utils::{
 };
 
 use super::filename::ImageFileName;
-use super::{AsLayerDesc, Layer, LayerAccessStatsReset, PathOrConf, PersistentLayerDesc};
+use super::{
+    AsLayerDesc, Layer, LayerAccessStatsReset, LayerE, PathOrConf, PersistentLayerDesc,
+    ResidentLayer,
+};
 
 ///
 /// Header stored in the beginning of the file
@@ -576,7 +581,7 @@ impl ImageLayerWriterInner {
     ///
     /// Finish writing the image layer.
     ///
-    fn finish(self) -> anyhow::Result<ImageLayer> {
+    async fn finish(self, timeline: &Arc<Timeline>) -> anyhow::Result<ResidentLayer> {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
 
@@ -619,13 +624,6 @@ impl ImageLayerWriterInner {
         // Note: Because we open the file in write-only mode, we cannot
         // reuse the same VirtualFile for reading later. That's why we don't
         // set inner.file here. The first read will have to re-open it.
-        let layer = ImageLayer {
-            path_or_conf: PathOrConf::Conf(self.conf),
-            desc,
-            lsn: self.lsn,
-            access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
-            inner: OnceCell::new(),
-        };
 
         // fsync the file
         file.sync_all()?;
@@ -645,7 +643,9 @@ impl ImageLayerWriterInner {
         );
         std::fs::rename(self.path, final_path)?;
 
-        trace!("created image layer {}", layer.path().display());
+        let layer = LayerE::for_written(self.conf, &timeline, desc).await?;
+
+        trace!("created image layer {}", layer.local_path().display());
 
         Ok(layer)
     }
@@ -713,8 +713,11 @@ impl ImageLayerWriter {
     ///
     /// Finish writing the image layer.
     ///
-    pub fn finish(mut self) -> anyhow::Result<ImageLayer> {
-        self.inner.take().unwrap().finish()
+    pub(crate) async fn finish(
+        mut self,
+        timeline: &Arc<Timeline>,
+    ) -> anyhow::Result<super::ResidentLayer> {
+        self.inner.take().unwrap().finish(timeline)
     }
 }
 
