@@ -1057,7 +1057,7 @@ impl Timeline {
         let mut results = Vec::with_capacity(layers_to_evict.len());
 
         for l in layers_to_evict {
-            results.push(Some(l.evict(&remote_client).await.map(|_| ())));
+            results.push(Some(l.evict(remote_client).await.map(|_| ())));
         }
 
         // commit the updates & release locks
@@ -1685,9 +1685,9 @@ impl Timeline {
         if has_local_layers {
             // Are there local files that don't exist remotely? Schedule uploads for them.
             // Local timeline metadata will get uploaded to remove along witht he layers.
-            for (_, layer) in &local_only_layers {
-                // FIXME: we could return the pair of these for resident layers from ctor (Arc<LayerE>,
-                // Arc<ResidentLayer>)
+            for layer in local_only_layers.values() {
+                // FIXME: we could return the pair of these for resident layers from ctor (ResidentLayer)
+                // but with checking that the file exists, or some proof or whatever
                 let layer = layer
                     .guard_against_eviction(false)
                     .await
