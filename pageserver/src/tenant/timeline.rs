@@ -3091,13 +3091,11 @@ impl TryFrom<CompactLevel0Phase1StatsBuilder> for CompactLevel0Phase1Stats {
 }
 
 impl Timeline {
-    /// Level0 files first phase of compaction, explained in the [`compact_inner`] comment.
+    /// Level0 files first phase of compaction, explained in the [`Self::compact`] comment.
     ///
     /// This method takes the `_layer_removal_cs` guard to highlight it required downloads are
     /// returned as an error. If the `layer_removal_cs` boundary is changed not to be taken in the
     /// start of level0 files compaction, the on-demand download should be revisited as well.
-    ///
-    /// [`compact_inner`]: Self::compact_inner
     async fn compact_level0_phase1(
         self: &Arc<Self>,
         _layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
