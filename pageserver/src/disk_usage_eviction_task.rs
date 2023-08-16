@@ -400,19 +400,7 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
                             Some(Ok(())) => {
                                 usage_assumed.add_available_bytes(file_size);
                             }
-                            Some(Err(EvictionError::CannotEvictRemoteLayer)) => {
-                                unreachable!("get_local_layers_for_disk_usage_eviction finds only local layers")
-                            }
                             Some(Err(EvictionError::FileNotFound)) => {
-                                evictions_failed.file_sizes += file_size;
-                                evictions_failed.count += 1;
-                            }
-                            Some(Err(
-                                e @ EvictionError::LayerNotFound(_)
-                                | e @ EvictionError::StatFailed(_),
-                            )) => {
-                                let e = utils::error::report_compact_sources(&e);
-                                warn!(%layer, "failed to evict layer: {e}");
                                 evictions_failed.file_sizes += file_size;
                                 evictions_failed.count += 1;
                             }

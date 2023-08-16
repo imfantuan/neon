@@ -264,7 +264,8 @@ impl Timeline {
             Ok(results) => results,
         };
         assert_eq!(results.len(), candidates.len());
-        for (l, result) in candidates.iter().zip(results) {
+        drop(candidates);
+        for result in results {
             match result {
                 None => {
                     stats.skipped_for_shutdown += 1;
@@ -272,18 +273,8 @@ impl Timeline {
                 Some(Ok(())) => {
                     stats.evicted += 1;
                 }
-                Some(Err(EvictionError::CannotEvictRemoteLayer)) => {
-                    stats.not_evictable += 1;
-                }
                 Some(Err(EvictionError::FileNotFound)) => {
                     // compaction/gc removed the file while we were waiting on layer_removal_cs
-                    stats.not_evictable += 1;
-                }
-                Some(Err(
-                    e @ EvictionError::LayerNotFound(_) | e @ EvictionError::StatFailed(_),
-                )) => {
-                    let e = utils::error::report_compact_sources(&e);
-                    warn!(layer = %l, "failed to evict layer: {e}");
                     stats.not_evictable += 1;
                 }
             }

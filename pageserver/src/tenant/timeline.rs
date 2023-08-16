@@ -1159,21 +1159,10 @@ impl Timeline {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum EvictionError {
-    #[error("cannot evict a remote layer")]
-    CannotEvictRemoteLayer,
     /// Most likely the to-be evicted layer has been deleted by compaction or gc which use the same
     /// locks, so they got to execute before the eviction.
     #[error("file backing the layer has been removed already")]
     FileNotFound,
-    #[error("stat failed")]
-    StatFailed(#[source] std::io::Error),
-    /// In practice, this can be a number of things, but lets assume it means only this.
-    ///
-    /// This case includes situations such as the Layer was evicted and redownloaded in between,
-    /// because the file existed before an replacement attempt was made but now the Layers are
-    /// different objects in memory.
-    #[error("layer was no longer part of LayerMap")]
-    LayerNotFound(#[source] anyhow::Error),
 }
 
 /// Number of times we will compute partition within a checkpoint distance.
