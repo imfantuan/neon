@@ -62,7 +62,7 @@ use crate::{
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{
         self,
-        storage_layer::{AsLayerDesc, LayerE, ResidentLayer},
+        storage_layer::{AsLayerDesc, ResidentLayer},
         timeline::EvictionError,
         Timeline,
     },
