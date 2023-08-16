@@ -13,7 +13,7 @@ use crate::{
     tenant::{
         layer_map::{BatchedUpdates, LayerMap},
         storage_layer::{
-            AsLayerDesc, InMemoryLayer, Layer, LayerE, PersistentLayerDesc, PersistentLayerKey,
+            AsLayerDesc, InMemoryLayer, LayerE, PersistentLayerDesc, PersistentLayerKey,
             ResidentLayer,
         },
     },
