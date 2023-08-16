@@ -643,7 +643,7 @@ impl ImageLayerWriterInner {
         );
         std::fs::rename(self.path, final_path)?;
 
-        let layer = LayerE::for_written(self.conf, &timeline, desc)?;
+        let layer = LayerE::for_written(self.conf, timeline, desc)?;
 
         trace!("created image layer {}", layer.local_path().display());
 
