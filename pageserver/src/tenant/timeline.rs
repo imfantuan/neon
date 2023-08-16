@@ -624,8 +624,6 @@ impl Timeline {
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> Result<(), CompactionError> {
-        const ROUNDS: usize = 2;
-
         static CONCURRENT_COMPACTIONS: once_cell::sync::Lazy<tokio::sync::Semaphore> =
             once_cell::sync::Lazy::new(|| {
                 let total_threads = *task_mgr::BACKGROUND_RUNTIME_WORKER_THREADS;
