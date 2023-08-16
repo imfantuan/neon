@@ -425,6 +425,12 @@ pub(crate) struct LayerE {
     /// for it.
     version: AtomicUsize,
     have_remote_client: bool,
+
+    /// Allow subscribing to when the layer actually gets evicted.
+    ///
+    /// This might never come unless eviction called periodically.
+    #[cfg(test)]
+    evicted: tokio::sync::Notify,
 }
 
 impl std::fmt::Display for LayerE {
@@ -506,6 +512,8 @@ impl LayerE {
             wanted_evicted: AtomicBool::new(false),
             inner: Default::default(),
             version: AtomicUsize::new(0),
+            #[cfg(test)]
+            evicted: tokio::sync::Notify::default(),
         }
     }
 
@@ -537,6 +545,8 @@ impl LayerE {
                 wanted_evicted: AtomicBool::new(false),
                 inner: tokio::sync::Mutex::new(Some(ResidentOrWantedEvicted::Resident(inner))),
                 version: AtomicUsize::new(0),
+                #[cfg(test)]
+                evicted: tokio::sync::Notify::default(),
             }
         });
 
@@ -590,6 +600,11 @@ impl LayerE {
             // already evicted; the wanted_evicted will be reset by next download
             Err(super::timeline::EvictionError::FileNotFound)
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_evicted(&self) -> impl std::future::Future<Output = ()> + '_ {
+        self.evicted.notified()
     }
 
     /// Delete the layer file when the `self` gets dropped, also schedule a remote index upload
@@ -972,7 +987,12 @@ impl LayerE {
                         }
                     });
 
-                    match capture_mtime_and_delete.await {
+                    let res = capture_mtime_and_delete.await;
+
+                    #[cfg(test)]
+                    this.evicted.notify_waiters();
+
+                    match res {
                         Ok(Ok(local_layer_mtime)) => {
                             let duration =
                                 std::time::SystemTime::now().duration_since(local_layer_mtime);
@@ -1019,6 +1039,7 @@ impl LayerE {
     }
 }
 
+#[derive(Debug, PartialEq)]
 pub(crate) enum NeedsDownload {
     NotFound,
     NotFile,

@@ -4745,9 +4745,7 @@ mod tests {
 
     use utils::{id::TimelineId, lsn::Lsn};
 
-    use crate::tenant::{harness::TenantHarness, storage_layer::PersistentLayer};
-
-    use super::{EvictionError, Timeline};
+    use crate::tenant::{harness::TenantHarness, storage_layer::LayerE, Timeline};
 
     #[tokio::test]
     async fn two_layer_eviction_attempts_at_the_same_time() {
@@ -4781,22 +4779,24 @@ mod tests {
             .expect("just configured this");
 
         let layer = find_some_layer(&timeline).await;
+        let layer = layer.guard_against_eviction(false).await.unwrap();
 
         let cancel = tokio_util::sync::CancellationToken::new();
         let batch = [layer];
 
         let first = {
-            let cancel = cancel.clone();
+            let cancel = cancel.child_token();
             async {
+                let cancel = cancel;
                 timeline
-                    .evict_layer_batch(&rc, &batch, cancel)
+                    .evict_layer_batch(&rc, &batch, &cancel)
                     .await
                     .unwrap()
             }
         };
         let second = async {
             timeline
-                .evict_layer_batch(&rc, &batch, cancel)
+                .evict_layer_batch(&rc, &batch, &cancel)
                 .await
                 .unwrap()
         };
@@ -4805,14 +4805,23 @@ mod tests {
 
         let (first, second) = (only_one(first), only_one(second));
 
+        // both seemingly succeed, but only because we are holding on to the downloaded layer
         match (first, second) {
-            (Ok(()), Err(EvictionError::FileNotFound))
-            | (Err(EvictionError::FileNotFound), Ok(())) => {
-                // one of the evictions gets to do it,
-                // other one gets FileNotFound. all is good.
-            }
+            (Ok(()), Ok(())) => {}
             other => unreachable!("unexpected {:?}", other),
         }
+
+        assert_eq!(batch[0].needs_download_blocking().unwrap(), None);
+
+        let layer: Arc<LayerE> = batch[0].clone().into();
+        let mut evicted = std::pin::pin!(layer.wait_evicted());
+
+        assert_eq!(futures::future::poll_immediate(&mut evicted).await, None);
+
+        drop(batch);
+
+        // now that the guard (ResidentLayer) within batch is dropped, we will eventually evict
+        evicted.await;
     }
 
     fn any_context() -> crate::context::RequestContext {
@@ -4829,7 +4838,7 @@ mod tests {
             .expect("no cancellation")
     }
 
-    async fn find_some_layer(timeline: &Timeline) -> Arc<dyn PersistentLayer> {
+    async fn find_some_layer(timeline: &Timeline) -> Arc<LayerE> {
         let layers = timeline.layers.read().await;
         let desc = layers
             .layer_map()
