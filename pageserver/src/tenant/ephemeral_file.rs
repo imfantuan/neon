@@ -13,6 +13,7 @@ use std::ops::DerefMut;
 use std::os::unix::prelude::FileExt;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
+use tokio::runtime::Handle;
 use tracing::*;
 use utils::id::{TenantId, TimelineId};
 
@@ -62,13 +63,14 @@ impl EphemeralFile {
         self.size
     }
 
-    pub(crate) fn read_blk(&self, blknum: u32) -> Result<BlockLease, io::Error> {
+    pub(crate) async fn read_blk(&self, blknum: u32) -> Result<BlockLease, io::Error> {
         let flushed_blknums = 0..self.size / PAGE_SZ as u64;
         if flushed_blknums.contains(&(blknum as u64)) {
             let cache = page_cache::get();
             loop {
                 match cache
                     .read_immutable_buf(self.page_cache_file_id, blknum)
+                    .await
                     .map_err(|e| {
                         std::io::Error::new(
                             std::io::ErrorKind::Other,
@@ -144,7 +146,7 @@ impl BlobWriter for EphemeralFile {
                             self.blknum as u64 * PAGE_SZ as u64,
                         ) {
                             Ok(_) => {
-                                // Pre-warm the page cache with what we just wrote.
+                                /*// Pre-warm the page cache with what we just wrote.
                                 // This isn't necessary for coherency/correctness, but it's how we've always done it.
                                 let cache = page_cache::get();
                                 match cache.read_immutable_buf(
@@ -166,7 +168,7 @@ impl BlobWriter for EphemeralFile {
                                         error!("ephemeral_file write_blob failed to get immutable buf to pre-warm page cache: {e:?}");
                                         // fail gracefully, it's not the end of the world if we can't pre-warm the cache here
                                     }
-                                }
+                                }*/
                                 // Zero the buffer for re-use.
                                 // Zeroing is critical for correcntess because the write_blob code below
                                 // and similarly read_blk expect zeroed pages.
@@ -226,7 +228,7 @@ impl Drop for EphemeralFile {
     fn drop(&mut self) {
         // drop all pages from page cache
         let cache = page_cache::get();
-        cache.drop_buffers_for_immutable(self.page_cache_file_id);
+        Handle::current().block_on(cache.drop_buffers_for_immutable(self.page_cache_file_id));
 
         // unlink the file
         let res = std::fs::remove_file(&self.file.path);

@@ -79,13 +79,13 @@ pub(crate) enum BlockReaderRef<'a> {
 
 impl<'a> BlockReaderRef<'a> {
     #[inline(always)]
-    fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
+    async fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
         use BlockReaderRef::*;
         match self {
-            FileBlockReaderVirtual(r) => r.read_blk(blknum),
-            FileBlockReaderFile(r) => r.read_blk(blknum),
-            EphemeralFile(r) => r.read_blk(blknum),
-            Adapter(r) => r.read_blk(blknum),
+            FileBlockReaderVirtual(r) => r.read_blk(blknum).await,
+            FileBlockReaderFile(r) => r.read_blk(blknum).await,
+            EphemeralFile(r) => r.read_blk(blknum).await,
+            Adapter(r) => r.read_blk(blknum).await,
             #[cfg(test)]
             TestDisk(r) => r.read_blk(blknum),
         }
@@ -130,8 +130,8 @@ impl<'a> BlockCursor<'a> {
     /// access to the contents of the page. (For the page cache, the
     /// lease object represents a lock on the buffer.)
     #[inline(always)]
-    pub fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
-        self.reader.read_blk(blknum)
+    pub async fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
+        self.reader.read_blk(blknum).await
     }
 }
 
@@ -161,11 +161,13 @@ where
         assert!(buf.len() == PAGE_SZ);
         self.file.read_exact_at(buf, blkno as u64 * PAGE_SZ as u64)
     }
-    pub(crate) fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
+    pub(crate) async fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
+        // Look up the right page
         let cache = page_cache::get();
         loop {
             match cache
                 .read_immutable_buf(self.file_id, blknum)
+                .await
                 .map_err(|e| {
                     std::io::Error::new(
                         std::io::ErrorKind::Other,

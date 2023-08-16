@@ -75,14 +75,13 @@
 use std::{
     collections::{hash_map::Entry, HashMap},
     convert::TryInto,
-    sync::{
-        atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering},
-        RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError,
-    },
+    sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering},
 };
 
 use anyhow::Context;
 use once_cell::sync::OnceCell;
+use tokio::runtime::Handle;
+use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use utils::{
     id::{TenantId, TimelineId},
     lsn::Lsn,
@@ -308,7 +307,7 @@ impl Drop for PageWriteGuard<'_> {
         assert!(self.inner.key.is_some());
         if !self.valid {
             let self_key = self.inner.key.as_ref().unwrap();
-            PAGE_CACHE.get().unwrap().remove_mapping(self_key);
+            Handle::current().block_on(PAGE_CACHE.get().unwrap().remove_mapping(self_key));
             self.inner.key = None;
         }
     }
@@ -337,7 +336,7 @@ impl PageCache {
     /// The 'lsn' is an upper bound, this will return the latest version of
     /// the given block, but not newer than 'lsn'. Returns the actual LSN of the
     /// returned page.
-    pub fn lookup_materialized_page(
+    pub async fn lookup_materialized_page(
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
@@ -357,7 +356,7 @@ impl PageCache {
             lsn,
         };
 
-        if let Some(guard) = self.try_lock_for_read(&mut cache_key) {
+        if let Some(guard) = self.try_lock_for_read(&mut cache_key).await {
             if let CacheKey::MaterializedPage {
                 hash_key: _,
                 lsn: available_lsn,
@@ -384,7 +383,7 @@ impl PageCache {
     ///
     /// Store an image of the given page in the cache.
     ///
-    pub fn memorize_materialized_page(
+    pub async fn memorize_materialized_page(
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
@@ -401,7 +400,7 @@ impl PageCache {
             lsn,
         };
 
-        match self.lock_for_write(&cache_key)? {
+        match self.lock_for_write(&cache_key).await? {
             WriteBufResult::Found(write_guard) => {
                 // We already had it in cache. Another thread must've put it there
                 // concurrently. Check that it had the same contents that we
@@ -419,25 +418,29 @@ impl PageCache {
 
     // Section 1.2: Public interface functions for working with immutable file pages.
 
-    pub fn read_immutable_buf(&self, file_id: FileId, blkno: u32) -> anyhow::Result<ReadBufResult> {
+    pub async fn read_immutable_buf(
+        &self,
+        file_id: FileId,
+        blkno: u32,
+    ) -> anyhow::Result<ReadBufResult> {
         let mut cache_key = CacheKey::ImmutableFilePage { file_id, blkno };
 
-        self.lock_for_read(&mut cache_key)
+        self.lock_for_read(&mut cache_key).await
     }
 
     /// Immediately drop all buffers belonging to given file
-    pub fn drop_buffers_for_immutable(&self, drop_file_id: FileId) {
+    pub async fn drop_buffers_for_immutable(&self, drop_file_id: FileId) {
         for slot_idx in 0..self.slots.len() {
             let slot = &self.slots[slot_idx];
 
-            let mut inner = slot.inner.write().unwrap();
+            let mut inner = slot.inner.write().await;
             if let Some(key) = &inner.key {
                 match key {
                     CacheKey::ImmutableFilePage { file_id, blkno: _ }
                         if *file_id == drop_file_id =>
                     {
                         // remove mapping for old buffer
-                        self.remove_mapping(key);
+                        self.remove_mapping(&key).await;
                         inner.key = None;
                     }
                     _ => {}
@@ -463,14 +466,14 @@ impl PageCache {
     ///
     /// If no page is found, returns None and *cache_key is left unmodified.
     ///
-    fn try_lock_for_read(&self, cache_key: &mut CacheKey) -> Option<PageReadGuard> {
+    async fn try_lock_for_read(&self, cache_key: &mut CacheKey) -> Option<PageReadGuard> {
         let cache_key_orig = cache_key.clone();
-        if let Some(slot_idx) = self.search_mapping(cache_key) {
+        if let Some(slot_idx) = self.search_mapping(cache_key).await {
             // The page was found in the mapping. Lock the slot, and re-check
             // that it's still what we expected (because we released the mapping
             // lock already, another thread could have evicted the page)
             let slot = &self.slots[slot_idx];
-            let inner = slot.inner.read().unwrap();
+            let inner = slot.inner.read().await;
             if inner.key.as_ref() == Some(cache_key) {
                 slot.inc_usage_count();
                 return Some(PageReadGuard(inner));
@@ -511,7 +514,7 @@ impl PageCache {
     /// }
     /// ```
     ///
-    fn lock_for_read(&self, cache_key: &mut CacheKey) -> anyhow::Result<ReadBufResult> {
+    async fn lock_for_read(&self, cache_key: &mut CacheKey) -> anyhow::Result<ReadBufResult> {
         let (read_access, hit) = match cache_key {
             CacheKey::MaterializedPage { .. } => {
                 unreachable!("Materialized pages use lookup_materialized_page")
@@ -526,7 +529,7 @@ impl PageCache {
         let mut is_first_iteration = true;
         loop {
             // First check if the key already exists in the cache.
-            if let Some(read_guard) = self.try_lock_for_read(cache_key) {
+            if let Some(read_guard) = self.try_lock_for_read(cache_key).await {
                 if is_first_iteration {
                     hit.inc();
                 }
@@ -535,14 +538,16 @@ impl PageCache {
             is_first_iteration = false;
 
             // Not found. Find a victim buffer
-            let (slot_idx, mut inner) =
-                self.find_victim().context("Failed to find evict victim")?;
+            let (slot_idx, mut inner) = self
+                .find_victim()
+                .await
+                .context("Failed to find evict victim")?;
 
             // Insert mapping for this. At this point, we may find that another
             // thread did the same thing concurrently. In that case, we evicted
             // our victim buffer unnecessarily. Put it into the free list and
             // continue with the slot that the other thread chose.
-            if let Some(_existing_slot_idx) = self.try_insert_mapping(cache_key, slot_idx) {
+            if let Some(_existing_slot_idx) = self.try_insert_mapping(cache_key, slot_idx).await {
                 // TODO: put to free list
 
                 // We now just loop back to start from beginning. This is not
@@ -569,13 +574,13 @@ impl PageCache {
     /// found, returns None.
     ///
     /// When locking a page for writing, the search criteria is always "exact".
-    fn try_lock_for_write(&self, cache_key: &CacheKey) -> Option<PageWriteGuard> {
-        if let Some(slot_idx) = self.search_mapping_for_write(cache_key) {
+    async fn try_lock_for_write(&self, cache_key: &CacheKey) -> Option<PageWriteGuard> {
+        if let Some(slot_idx) = self.search_mapping_for_write(cache_key).await {
             // The page was found in the mapping. Lock the slot, and re-check
             // that it's still what we expected (because we don't released the mapping
             // lock already, another thread could have evicted the page)
             let slot = &self.slots[slot_idx];
-            let inner = slot.inner.write().unwrap();
+            let inner = slot.inner.write().await;
             if inner.key.as_ref() == Some(cache_key) {
                 slot.inc_usage_count();
                 return Some(PageWriteGuard { inner, valid: true });
@@ -588,22 +593,24 @@ impl PageCache {
     ///
     /// Similar to lock_for_read(), but the returned buffer is write-locked and
     /// may be modified by the caller even if it's already found in the cache.
-    fn lock_for_write(&self, cache_key: &CacheKey) -> anyhow::Result<WriteBufResult> {
+    async fn lock_for_write(&self, cache_key: &CacheKey) -> anyhow::Result<WriteBufResult> {
         loop {
             // First check if the key already exists in the cache.
-            if let Some(write_guard) = self.try_lock_for_write(cache_key) {
+            if let Some(write_guard) = self.try_lock_for_write(cache_key).await {
                 return Ok(WriteBufResult::Found(write_guard));
             }
 
             // Not found. Find a victim buffer
-            let (slot_idx, mut inner) =
-                self.find_victim().context("Failed to find evict victim")?;
+            let (slot_idx, mut inner) = self
+                .find_victim()
+                .await
+                .context("Failed to find evict victim")?;
 
             // Insert mapping for this. At this point, we may find that another
             // thread did the same thing concurrently. In that case, we evicted
             // our victim buffer unnecessarily. Put it into the free list and
             // continue with the slot that the other thread chose.
-            if let Some(_existing_slot_idx) = self.try_insert_mapping(cache_key, slot_idx) {
+            if let Some(_existing_slot_idx) = self.try_insert_mapping(cache_key, slot_idx).await {
                 // TODO: put to free list
 
                 // We now just loop back to start from beginning. This is not
@@ -640,10 +647,10 @@ impl PageCache {
     /// returns.  The caller is responsible for re-checking that the slot still
     /// contains the page with the same key before using it.
     ///
-    fn search_mapping(&self, cache_key: &mut CacheKey) -> Option<usize> {
+    async fn search_mapping(&self, cache_key: &mut CacheKey) -> Option<usize> {
         match cache_key {
             CacheKey::MaterializedPage { hash_key, lsn } => {
-                let map = self.materialized_page_map.read().unwrap();
+                let map = self.materialized_page_map.read().await;
                 let versions = map.get(hash_key)?;
 
                 let version_idx = match versions.binary_search_by_key(lsn, |v| v.lsn) {
@@ -656,7 +663,7 @@ impl PageCache {
                 Some(version.slot_idx)
             }
             CacheKey::ImmutableFilePage { file_id, blkno } => {
-                let map = self.immutable_page_map.read().unwrap();
+                let map = self.immutable_page_map.read().await;
                 Some(*map.get(&(*file_id, *blkno))?)
             }
         }
@@ -666,10 +673,10 @@ impl PageCache {
     ///
     /// Like 'search_mapping, but performs an "exact" search. Used for
     /// allocating a new buffer.
-    fn search_mapping_for_write(&self, key: &CacheKey) -> Option<usize> {
+    async fn search_mapping_for_write(&self, key: &CacheKey) -> Option<usize> {
         match key {
             CacheKey::MaterializedPage { hash_key, lsn } => {
-                let map = self.materialized_page_map.read().unwrap();
+                let map = self.materialized_page_map.read().await;
                 let versions = map.get(hash_key)?;
 
                 if let Ok(version_idx) = versions.binary_search_by_key(lsn, |v| v.lsn) {
@@ -679,7 +686,7 @@ impl PageCache {
                 }
             }
             CacheKey::ImmutableFilePage { file_id, blkno } => {
-                let map = self.immutable_page_map.read().unwrap();
+                let map = self.immutable_page_map.read().await;
                 Some(*map.get(&(*file_id, *blkno))?)
             }
         }
@@ -688,13 +695,13 @@ impl PageCache {
     ///
     /// Remove mapping for given key.
     ///
-    fn remove_mapping(&self, old_key: &CacheKey) {
+    async fn remove_mapping(&self, old_key: &CacheKey) {
         match old_key {
             CacheKey::MaterializedPage {
                 hash_key: old_hash_key,
                 lsn: old_lsn,
             } => {
-                let mut map = self.materialized_page_map.write().unwrap();
+                let mut map = self.materialized_page_map.write().await;
                 if let Entry::Occupied(mut old_entry) = map.entry(old_hash_key.clone()) {
                     let versions = old_entry.get_mut();
 
@@ -712,7 +719,7 @@ impl PageCache {
                 }
             }
             CacheKey::ImmutableFilePage { file_id, blkno } => {
-                let mut map = self.immutable_page_map.write().unwrap();
+                let mut map = self.immutable_page_map.write().await;
                 map.remove(&(*file_id, *blkno))
                     .expect("could not find old key in mapping");
                 self.size_metrics.current_bytes_immutable.sub_page_sz(1);
@@ -725,13 +732,13 @@ impl PageCache {
     ///
     /// If a mapping already existed for the given key, returns the slot index
     /// of the existing mapping and leaves it untouched.
-    fn try_insert_mapping(&self, new_key: &CacheKey, slot_idx: usize) -> Option<usize> {
+    async fn try_insert_mapping(&self, new_key: &CacheKey, slot_idx: usize) -> Option<usize> {
         match new_key {
             CacheKey::MaterializedPage {
                 hash_key: new_key,
                 lsn: new_lsn,
             } => {
-                let mut map = self.materialized_page_map.write().unwrap();
+                let mut map = self.materialized_page_map.write().await;
                 let versions = map.entry(new_key.clone()).or_default();
                 match versions.binary_search_by_key(new_lsn, |v| v.lsn) {
                     Ok(version_idx) => Some(versions[version_idx].slot_idx),
@@ -750,9 +757,8 @@ impl PageCache {
                     }
                 }
             }
-
             CacheKey::ImmutableFilePage { file_id, blkno } => {
-                let mut map = self.immutable_page_map.write().unwrap();
+                let mut map = self.immutable_page_map.write().await;
                 match map.entry((*file_id, *blkno)) {
                     Entry::Occupied(entry) => Some(*entry.get()),
                     Entry::Vacant(entry) => {
@@ -772,7 +778,7 @@ impl PageCache {
     /// Find a slot to evict.
     ///
     /// On return, the slot is empty and write-locked.
-    fn find_victim(&self) -> anyhow::Result<(usize, RwLockWriteGuard<SlotInner>)> {
+    async fn find_victim(&self) -> anyhow::Result<(usize, RwLockWriteGuard<SlotInner>)> {
         let iter_limit = self.slots.len() * 10;
         let mut iters = 0;
         loop {
@@ -784,10 +790,7 @@ impl PageCache {
             if slot.dec_usage_count() == 0 {
                 let mut inner = match slot.inner.try_write() {
                     Ok(inner) => inner,
-                    Err(TryLockError::Poisoned(err)) => {
-                        anyhow::bail!("buffer lock was poisoned: {err:?}")
-                    }
-                    Err(TryLockError::WouldBlock) => {
+                    Err(_err) => {
                         // If we have looped through the whole buffer pool 10 times
                         // and still haven't found a victim buffer, something's wrong.
                         // Maybe all the buffers were in locked. That could happen in
@@ -802,7 +805,7 @@ impl PageCache {
                 };
                 if let Some(old_key) = &inner.key {
                     // remove mapping for old buffer
-                    self.remove_mapping(old_key);
+                    self.remove_mapping(old_key).await;
                     inner.key = None;
                 }
                 return Ok((slot_idx, inner));

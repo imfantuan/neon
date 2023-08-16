@@ -98,7 +98,7 @@ pub(crate) fn parse_filename(name: &str) -> Option<LayerFile> {
 async fn get_holes(path: &Path, max_holes: usize) -> Result<Vec<Hole>> {
     let file = FileBlockReader::new(VirtualFile::open(path)?);
     let block_cursor = file.block_cursor();
-    let summary_blk = block_cursor.read_blk(0)?;
+    let summary_blk = block_cursor.read_blk(0).await?;
     let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
     let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
         actual_summary.index_start_blk,

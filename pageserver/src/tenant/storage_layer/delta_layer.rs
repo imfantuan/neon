@@ -469,7 +469,7 @@ impl DeltaLayer {
             PathOrConf::Path(_) => None,
         };
 
-        let loaded = DeltaLayerInner::load(&path, summary)?;
+        let loaded = DeltaLayerInner::load(&path, summary).await?;
 
         if let PathOrConf::Path(ref path) = self.path_or_conf {
             // not production code
@@ -843,13 +843,16 @@ impl Drop for DeltaLayerWriter {
 }
 
 impl DeltaLayerInner {
-    pub(super) fn load(path: &std::path::Path, summary: Option<Summary>) -> anyhow::Result<Self> {
+    pub(super) async fn load(
+        path: &std::path::Path,
+        summary: Option<Summary>,
+    ) -> anyhow::Result<Self> {
         let file = VirtualFile::open(path)
             .with_context(|| format!("Failed to open file '{}'", path.display()))?;
         let file = FileBlockReader::new(file);
 
         let block_cursor = file.block_cursor();
-        let summary_blk = block_cursor.read_blk(0)?;
+        let summary_blk = block_cursor.read_blk(0).await?;
         let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
 
         if let Some(mut expected_summary) = summary {
@@ -1031,7 +1034,7 @@ impl<'a> ValueRef<'a> {
 pub(crate) struct Adapter<T: AsRef<DeltaLayerInner>>(T);
 
 impl<T: AsRef<DeltaLayerInner>> Adapter<T> {
-    pub(crate) fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
-        self.0.as_ref().file.read_blk(blknum)
+    pub(crate) async fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
+        self.0.as_ref().file.read_blk(blknum).await
     }
 }
