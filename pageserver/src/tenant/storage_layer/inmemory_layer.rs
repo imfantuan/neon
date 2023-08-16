@@ -31,7 +31,7 @@ use std::fmt::Write as _;
 use std::ops::Range;
 use tokio::sync::RwLock;
 
-use super::{DeltaLayer, DeltaLayerWriter, Layer, ResidentLayer};
+use super::{DeltaLayerWriter, Layer, ResidentLayer};
 
 thread_local! {
     /// A buffer for serializing object during [`InMemoryLayer::put_value`].
