@@ -1009,11 +1009,6 @@ impl Timeline {
 
     /// Evict multiple layers at once, continuing through errors.
     ///
-    /// Try to evict the given `layers_to_evict` by
-    ///
-    /// 1. Replacing the given layer object in the layer map with a corresponding [`RemoteLayer`] object.
-    /// 2. Deleting the now unreferenced layer file from disk.
-    ///
     /// The `remote_client` should be this timeline's `self.remote_client`.
     /// We make the caller provide it so that they are responsible for handling the case
     /// where someone wants to evict the layer but no remote storage is configured.
@@ -1022,11 +1017,9 @@ impl Timeline {
     /// If `Err()` is returned, no eviction was attempted.
     /// Each position of `Ok(results)` corresponds to the layer in `layers_to_evict`.
     /// Meaning of each `result[i]`:
-    /// - `Some(Err(...))` if layer replacement failed for an unexpected reason
-    /// - `Some(Ok(true))` if everything went well.
-    /// - `Some(Ok(false))` if there was an expected reason why the layer could not be replaced, e.g.:
-    ///    - evictee was not yet downloaded
+    /// - `Some(Err(...))` if layer replacement failed for some reason
     ///    - replacement failed for an expectable reason (e.g., layer removed by GC before we grabbed all locks)
+    /// - `Some(Ok(()))` if everything went well.
     /// - `None` if no eviction attempt was made for the layer because `cancel.is_cancelled() == true`.
     async fn evict_layer_batch(
         &self,
