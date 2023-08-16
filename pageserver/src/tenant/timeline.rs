@@ -90,7 +90,7 @@ use self::walreceiver::{WalReceiver, WalReceiverConf};
 use super::config::TenantConf;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
-use super::storage_layer::{AsLayerDesc, Layer, LayerAccessStatsReset, ResidentLayer};
+use super::storage_layer::{AsLayerDesc, LayerAccessStatsReset, ResidentLayer};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(super) enum FlushLoopState {
@@ -970,6 +970,8 @@ impl Timeline {
 
         let Ok(local_layer) = local_layer.guard_against_eviction(false).await else { return Ok(Some(false)); };
 
+        let local_layer: Arc<LayerE> = local_layer.into();
+
         let remote_client = self
             .remote_client
             .as_ref()
@@ -996,7 +998,7 @@ impl Timeline {
     pub(crate) async fn evict_layers(
         &self,
         _: &GenericRemoteStorage,
-        layers_to_evict: &[ResidentLayer],
+        layers_to_evict: &[Arc<LayerE>],
         cancel: CancellationToken,
     ) -> anyhow::Result<Vec<Option<Result<(), EvictionError>>>> {
         let remote_client = self.remote_client.as_ref().expect(
@@ -1024,7 +1026,7 @@ impl Timeline {
     async fn evict_layer_batch(
         &self,
         remote_client: &Arc<RemoteTimelineClient>,
-        layers_to_evict: &[ResidentLayer],
+        layers_to_evict: &[Arc<LayerE>],
         _cancel: &CancellationToken,
     ) -> anyhow::Result<Vec<Option<Result<(), EvictionError>>>> {
         // ensure that the layers have finished uploading
@@ -4186,7 +4188,7 @@ pub(crate) struct DiskUsageEvictionInfo {
 }
 
 pub(crate) struct LocalLayerInfoForDiskUsageEviction {
-    pub layer: ResidentLayer,
+    pub layer: Arc<LayerE>,
     pub last_activity_ts: SystemTime,
 }
 
@@ -4240,7 +4242,8 @@ impl Timeline {
             });
 
             resident_layers.push(LocalLayerInfoForDiskUsageEviction {
-                layer: l,
+                // we explicitly don't want to keep this layer downloaded
+                layer: l.into(),
                 last_activity_ts,
             });
         }
@@ -4398,6 +4401,7 @@ mod tests {
 
         let layer = find_some_layer(&timeline).await;
         let layer = layer.guard_against_eviction(false).await.unwrap();
+        let layer = layer.drop_eviction_guard();
 
         let cancel = tokio_util::sync::CancellationToken::new();
         let batch = [layer];
@@ -4423,22 +4427,19 @@ mod tests {
 
         let (first, second) = (only_one(first), only_one(second));
 
-        // both seemingly succeed, but only because we are holding on to the downloaded layer
+        assert_eq!(batch[0].needs_download_blocking().unwrap(), None);
+
+        let layer: Arc<LayerE> = batch[0].clone();
+        let mut evicted = std::pin::pin!(layer.wait_evicted());
+        assert_eq!(futures::future::poll_immediate(&mut evicted).await, None);
+
+        // both seemingly succeed, but only one will actually evict
         match (first, second) {
             (Ok(()), Ok(())) => {}
             other => unreachable!("unexpected {:?}", other),
         }
 
-        assert_eq!(batch[0].needs_download_blocking().unwrap(), None);
-
-        let layer: Arc<LayerE> = batch[0].clone().into();
-        let mut evicted = std::pin::pin!(layer.wait_evicted());
-
-        assert_eq!(futures::future::poll_immediate(&mut evicted).await, None);
-
-        drop(batch);
-
-        // now that the guard (ResidentLayer) within batch is dropped, we will eventually evict
+        // after eviction has been requested, we will eventually evict
         evicted.await;
     }
 

@@ -407,6 +407,12 @@ impl std::fmt::Display for LayerE {
     }
 }
 
+impl std::fmt::Debug for LayerE {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self)
+    }
+}
+
 impl AsLayerDesc for LayerE {
     fn layer_desc(&self) -> &PersistentLayerDesc {
         &self.desc
@@ -572,6 +578,10 @@ impl LayerE {
 
     #[cfg(test)]
     pub(crate) fn wait_evicted(&self) -> impl std::future::Future<Output = ()> + '_ {
+        // for this to be actually useful, we must be first able to check some status, otherwise
+        // we could wait here for next eviction.
+        //
+        // states => (resident wanted_evicted evicted|wanted_evicted evicted resident)* wanted_garbage_collected? dropped
         self.evicted.notified()
     }
 
@@ -1064,8 +1074,8 @@ impl std::fmt::Debug for ResidentLayer {
 }
 
 impl ResidentLayer {
-    pub(crate) fn local_path(&self) -> &std::path::Path {
-        &self.owner.path
+    pub(crate) fn drop_eviction_guard(self) -> Arc<LayerE> {
+        self.into()
     }
 }
 
