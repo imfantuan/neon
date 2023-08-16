@@ -107,6 +107,7 @@ impl InMemoryLayer {
     fn end_lsn_or_max(&self) -> Lsn {
         self.end_lsn.get().copied().unwrap_or(Lsn::MAX)
     }
+    // FIXME: copy methods over, call them through trait
 }
 
 #[async_trait::async_trait]
