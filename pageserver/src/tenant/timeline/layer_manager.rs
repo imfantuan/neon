@@ -267,16 +267,6 @@ impl LayerManager {
         mapping.insert(layer);
     }
 
-    /// Helper function to remove a layer into the layer map and file manager
-    fn remove_historic_layer(
-        layer: Arc<LayerE>,
-        updates: &mut BatchedUpdates<'_>,
-        mapping: &mut LayerFileManager<LayerE>,
-    ) {
-        updates.remove_historic(layer.layer_desc());
-        mapping.remove(layer);
-    }
-
     /// Removes the layer from local FS (if present) and from memory.
     /// Remote storage is not affected by this operation.
     fn delete_historic_layer(
