@@ -17,7 +17,7 @@ use anyhow::{ensure, Result};
 use pageserver_api::models::InMemoryLayerInfo;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use tracing::*;
 use utils::{
     bin_ser::BeSer,
