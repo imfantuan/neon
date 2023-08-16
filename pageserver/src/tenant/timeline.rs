@@ -1546,7 +1546,7 @@ impl Timeline {
                 if let Some(reason) = needs_download {
                     warn!("removing local file {} because {reason}", path.display());
                     if !reason.is_not_found() {
-                        if let Err(err) = rename_to_backup(&path) {
+                        if let Err(err) = rename_to_backup(path) {
                             assert!(path.exists(), "we would leave the local_layer without a file if this does not hold: {}", path.display());
                             return Err(err.context("rename to backup"));
                         } else if let Some(actual) = reason.actual_size() {
@@ -3448,7 +3448,7 @@ impl Timeline {
         }
 
         if let Some(writer) = writer {
-            new_layers.push(writer.finish(prev_key.unwrap().next(), &self)?);
+            new_layers.push(writer.finish(prev_key.unwrap().next(), self)?);
         }
 
         // Sync layers
@@ -3541,7 +3541,7 @@ impl Timeline {
                 phase1_layers_locked,
                 stats,
                 target_file_size,
-                &ctx,
+                ctx,
             )
             .await?
         };
