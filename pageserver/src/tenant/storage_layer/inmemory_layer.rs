@@ -31,7 +31,7 @@ use std::fmt::Write as _;
 use std::ops::Range;
 use tokio::sync::RwLock;
 
-use super::{DeltaLayerWriter, Layer, ResidentLayer};
+use super::{DeltaLayerWriter, ResidentLayer};
 
 thread_local! {
     /// A buffer for serializing object during [`InMemoryLayer::put_value`].
@@ -39,6 +39,7 @@ thread_local! {
     static SER_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::new());
 }
 
+/// InMemoryLayer is always incremental.
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
     tenant_id: TenantId,
@@ -108,17 +109,8 @@ impl InMemoryLayer {
         self.end_lsn.get().copied().unwrap_or(Lsn::MAX)
     }
 
-    pub(crate) fn get_key_range(&self) -> Range<Key> {
-        Key::MIN..Key::MAX
-    }
-
     pub(crate) fn get_lsn_range(&self) -> Range<Lsn> {
         self.start_lsn..self.end_lsn_or_max()
-    }
-
-    pub(crate) fn is_incremental(&self) -> bool {
-        // in-memory layer is always considered incremental.
-        true
     }
 
     /// debugging function to print out the contents of the layer
@@ -218,36 +210,6 @@ impl InMemoryLayer {
         } else {
             Ok(ValueReconstructResult::Complete)
         }
-    }
-}
-
-#[async_trait::async_trait]
-impl Layer for InMemoryLayer {
-    fn get_key_range(&self) -> Range<Key> {
-        self.get_key_range()
-    }
-
-    fn get_lsn_range(&self) -> Range<Lsn> {
-        self.get_lsn_range()
-    }
-
-    fn is_incremental(&self) -> bool {
-        self.is_incremental()
-    }
-
-    async fn get_value_reconstruct_data(
-        &self,
-        key: Key,
-        lsn_range: Range<Lsn>,
-        reconstruct_data: &mut ValueReconstructState,
-        ctx: &RequestContext,
-    ) -> Result<ValueReconstructResult> {
-        self.get_value_reconstruct_data(key, lsn_range, reconstruct_data, ctx)
-            .await
-    }
-
-    async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
-        self.dump(verbose, ctx).await
     }
 }
 
