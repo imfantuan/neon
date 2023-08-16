@@ -29,7 +29,6 @@ use crate::{
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{
         config::{EvictionPolicy, EvictionPolicyLayerAccessThreshold},
-        storage_layer::PersistentLayer,
         timeline::EvictionError,
         LogicalSizeCalculationCause, Tenant,
     },
