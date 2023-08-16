@@ -181,7 +181,7 @@ impl LayerAccessStats {
     /// [`LayerLoad`]: LayerResidenceEventReason::LayerLoad
     /// [`record_residence_event`]: Self::record_residence_event
     pub(crate) fn for_loading_layer(
-        layer_map_lock_held_witness: &LayerManager,
+        _layer_map_lock_held_witness: &LayerManager,
         status: LayerResidenceStatus,
     ) -> Self {
         let new = LayerAccessStats(Mutex::new(LayerAccessStatsLocked::default()));
@@ -198,7 +198,7 @@ impl LayerAccessStats {
     /// [`record_residence_event`]: Self::record_residence_event
     pub(crate) fn clone_for_residence_change(
         &self,
-        layer_map_lock_held_witness: &LayerManager,
+        _layer_map_lock_held_witness: &LayerManager,
         new_status: LayerResidenceStatus,
     ) -> LayerAccessStats {
         let clone = {
