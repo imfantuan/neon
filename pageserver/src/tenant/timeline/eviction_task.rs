@@ -252,7 +252,7 @@ impl Timeline {
         };
 
         let results = match self
-            .evict_layer_batch(remote_client, &candidates[..], &cancel)
+            .evict_layer_batch(remote_client, &candidates[..], cancel)
             .await
         {
             Err(pre_err) => {
