@@ -90,9 +90,7 @@ use self::walreceiver::{WalReceiver, WalReceiverConf};
 use super::config::TenantConf;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
-use super::storage_layer::{
-    AsLayerDesc, Layer, LayerAccessStatsReset, PersistentLayerDesc, ResidentLayer,
-};
+use super::storage_layer::{AsLayerDesc, Layer, LayerAccessStatsReset, ResidentLayer};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(super) enum FlushLoopState {
@@ -4391,34 +4389,6 @@ fn rename_to_backup(path: &Path) -> anyhow::Result<()> {
     }
 
     bail!("couldn't find an unused backup number for {:?}", path)
-}
-
-/// Similar to `Arc::ptr_eq`, but only compares the object pointers, not vtables.
-///
-/// Returns `true` if the two `Arc` point to the same layer, false otherwise.
-///
-/// If comparing persistent layers, ALWAYS compare the layer descriptor key.
-#[inline(always)]
-pub fn compare_arced_layers<L: ?Sized>(left: &Arc<L>, right: &Arc<L>) -> bool {
-    // "dyn Trait" objects are "fat pointers" in that they have two components:
-    // - pointer to the object
-    // - pointer to the vtable
-    //
-    // rust does not provide a guarantee that these vtables are unique, but however
-    // `Arc::ptr_eq` as of writing (at least up to 1.67) uses a comparison where both the
-    // pointer and the vtable need to be equal.
-    //
-    // See: https://github.com/rust-lang/rust/issues/103763
-    //
-    // A future version of rust will most likely use this form below, where we cast each
-    // pointer into a pointer to unit, which drops the inaccessible vtable pointer, making it
-    // not affect the comparison.
-    //
-    // See: https://github.com/rust-lang/rust/pull/106450
-    let left = Arc::as_ptr(left) as *const ();
-    let right = Arc::as_ptr(right) as *const ();
-
-    left == right
 }
 
 #[cfg(test)]
