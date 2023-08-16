@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use tokio_postgres::NoTls;
-use tracing::{error, instrument};
+use tracing::{error, warn, instrument};
 
 use crate::compute::ComputeNode;
 
@@ -32,13 +32,24 @@ pub async fn check_writability(compute: &ComputeNode) -> Result<()> {
         ON CONFLICT (id) DO UPDATE
          SET updated_at = now();";
 
-    let result = client.simple_query(query).await?;
-
-    if result.len() != 2 {
-        return Err(anyhow::format_err!(
-            "expected 2 query results, but got {}",
-            result.len()
-        ));
+    match client.simple_query(query).await {
+        Ok(result) => {
+            if result.len() != 2 {
+                return Err(anyhow::format_err!(
+                    "expected 2 query results, but got {}",
+                    result.len()
+                ));
+            }
+        }
+        Err(err) => {
+            if let Some(state) = err.code() {
+                if state == &tokio_postgres::error::SqlState::DISK_FULL {
+                    warn!("Tenant disk is full");
+                    return Ok(());
+                }
+            }
+            error!("connection error: {}", err);
+        }
     }
 
     Ok(())
