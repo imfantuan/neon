@@ -3250,10 +3250,10 @@ impl Timeline {
         // particularly fast where the slice is made up of sorted sub-ranges.
         all_keys.sort_by_key(|DeltaEntry { key, lsn, .. }| (*key, *lsn));
 
+        // FIXME: this does not look like the correct place for this
         stats.read_lock_held_key_sort_micros = stats.read_lock_held_prerequisites_micros.till_now();
 
         for &DeltaEntry { key: next_key, .. } in all_keys.iter() {
-            let next_key = *next_key;
             if let Some(prev_key) = prev {
                 // just first fast filter
                 if next_key.to_i128() - prev_key.to_i128() >= min_hole_range {
@@ -3449,9 +3449,9 @@ impl Timeline {
             }
 
             fail_point!("delta-layer-writer-fail-before-finish", |_| {
-                Err(anyhow::anyhow!(
+                Err(CompactionError::Other(anyhow::anyhow!(
                     "failpoint delta-layer-writer-fail-before-finish"
-                ))
+                )))
             });
 
             writer.as_mut().unwrap().put_value(key, lsn, value)?;
