@@ -2560,11 +2560,6 @@ impl Timeline {
 
             if let Some(ref l) = delta_layer_to_add {
                 // TODO: move access stats, metrics update, etc. into layer manager.
-                l.access_stats().record_residence_event(
-                    &guard,
-                    LayerResidenceStatus::Resident,
-                    LayerResidenceEventReason::LayerCreate,
-                );
 
                 // update metrics
                 let sz = l.layer_desc().file_size;
@@ -2935,15 +2930,10 @@ impl Timeline {
         let mut guard = self.layers.write().await;
 
         for l in &image_layers {
+            // FIXME: these should be in guard
             self.metrics
                 .resident_physical_size_gauge
                 .add(l.layer_desc().file_size);
-            let l = Arc::new(l);
-            l.access_stats().record_residence_event(
-                &guard,
-                LayerResidenceStatus::Resident,
-                LayerResidenceEventReason::LayerCreate,
-            );
         }
         guard.track_new_image_layers(&image_layers);
         drop_wlock(guard);
