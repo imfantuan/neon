@@ -581,7 +581,7 @@ impl ImageLayerWriterInner {
     ///
     /// Finish writing the image layer.
     ///
-    async fn finish(self, timeline: &Arc<Timeline>) -> anyhow::Result<ResidentLayer> {
+    fn finish(self, timeline: &Arc<Timeline>) -> anyhow::Result<ResidentLayer> {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
 
@@ -643,7 +643,7 @@ impl ImageLayerWriterInner {
         );
         std::fs::rename(self.path, final_path)?;
 
-        let layer = LayerE::for_written(self.conf, &timeline, desc).await?;
+        let layer = LayerE::for_written(self.conf, &timeline, desc)?;
 
         trace!("created image layer {}", layer.local_path().display());
 
@@ -713,7 +713,7 @@ impl ImageLayerWriter {
     ///
     /// Finish writing the image layer.
     ///
-    pub(crate) async fn finish(
+    pub(crate) fn finish(
         mut self,
         timeline: &Arc<Timeline>,
     ) -> anyhow::Result<super::ResidentLayer> {

@@ -3168,7 +3168,7 @@ impl Timeline {
                         key = key.next();
                     }
                 }
-                let image_layer = image_layer_writer.finish(self).await?;
+                let image_layer = image_layer_writer.finish(self)?;
                 image_layers.push(image_layer);
             }
         }
