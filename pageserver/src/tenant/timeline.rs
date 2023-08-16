@@ -4532,14 +4532,14 @@ impl Timeline {
     }
 }
 
-pub struct DiskUsageEvictionInfo {
+pub(crate) struct DiskUsageEvictionInfo {
     /// Timeline's largest layer (remote or resident)
     pub max_layer_size: Option<u64>,
     /// Timeline's resident layers
     pub resident_layers: Vec<LocalLayerInfoForDiskUsageEviction>,
 }
 
-pub struct LocalLayerInfoForDiskUsageEviction {
+pub(crate) struct LocalLayerInfoForDiskUsageEviction {
     pub layer: ResidentLayer,
     pub last_activity_ts: SystemTime,
 }
