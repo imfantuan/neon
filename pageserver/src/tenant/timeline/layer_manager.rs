@@ -31,6 +31,9 @@ pub(crate) struct ApplyGcResultGuard<'a>(BatchedUpdates<'a>);
 impl ApplyGcResultGuard<'_> {
     // FIXME: this should not exist, it's done in drop, we cannot support transactionality with
     // this
+    //
+    // this existed for delaying the flush until over something, but now more stuff is contained in
+    // these methods.
     pub(crate) fn flush(self) {
         self.0.flush();
     }
