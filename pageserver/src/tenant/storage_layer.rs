@@ -1161,6 +1161,7 @@ impl DownloadedLayer {
             .as_ref()
             .map_err(|e| {
                 // errors are not clonabled, cannot but stringify
+                // test_broken_timeline matches this string
                 anyhow::anyhow!("layer loading failed: {e:#}")
             })
     }
