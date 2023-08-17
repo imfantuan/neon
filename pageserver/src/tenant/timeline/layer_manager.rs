@@ -77,8 +77,16 @@ impl LayerManager {
         self.layer_map.next_open_layer_at = Some(next_open_layer_at);
     }
 
-    pub(crate) fn initialize_remote_layers(&mut self, remote_layers: Vec<Arc<LayerE>>) {
+    pub(crate) fn initialize_remote_layers(
+        &mut self,
+        corrupted: Vec<Arc<LayerE>>,
+        remote_layers: Vec<Arc<LayerE>>,
+    ) {
         let mut updates = self.layer_map.batch_update();
+        for layer in corrupted {
+            updates.remove_historic(layer.layer_desc());
+            self.layer_fmgr.remove(layer);
+        }
         for layer in remote_layers {
             Self::insert_historic_layer(layer, &mut updates, &mut self.layer_fmgr);
         }

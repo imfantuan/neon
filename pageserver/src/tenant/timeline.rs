@@ -1385,9 +1385,7 @@ impl Timeline {
         layers.initialize_empty(Lsn(start_lsn.0));
     }
 
-    ///
     /// Scan the timeline directory to populate the layer map.
-    ///
     pub(super) async fn load_layer_map(&self, disk_consistent_lsn: Lsn) -> anyhow::Result<()> {
         let mut guard = self.layers.write().await;
 
@@ -1408,6 +1406,8 @@ impl Timeline {
             let fname = direntry.file_name();
             let fname = fname.to_string_lossy();
 
+            // FIXME: we'll rip this layer added below later in `reconcile_with_remote` if we find
+            // that the file size is wrong (later hash)
             if let Some(filename) = ImageFileName::parse_str(&fname) {
                 // create an ImageLayer struct for each image file.
                 if filename.lsn > disk_consistent_lsn {
@@ -1527,27 +1527,46 @@ impl Timeline {
             // If so, rename_to_backup those files & replace their local layer with
             // a RemoteLayer in the layer map so that we re-download them on-demand.
             if let Some(local_layer) = local_layer {
-                // FIXME: I removed an exists check which was not try_exists
-
                 let path = local_layer.local_path();
 
                 // FIXME: this could be async, but that'd be much more horrible
                 // FIXME: should just load local layers as ResidentLayer but we need something
                 // other than what the {Delta,Image}LayerWriters use
-                let needs_download = local_layer.needs_download_blocking().with_context(|| {
+                let reason = local_layer.needs_download_blocking().with_context(|| {
                     format!("check if local layer needs downloading {}", path.display())
                 })?;
 
-                if let Some(reason) = needs_download {
-                    warn!("removing local file {} because {reason}", path.display());
-                    if !reason.is_not_found() {
+                let m = LayerFileMetadata::new(local_layer.layer_desc().file_size);
+
+                if m != remote_layer_metadata {
+                    // string is dependend by tests
+                    warn!(
+                        "removing local file {} because {reason:?}, metadata mismatch",
+                        path.display()
+                    );
+
+                    let exists = !reason.as_ref().map(|x| x.is_not_found()).unwrap_or(false);
+
+                    if exists {
                         if let Err(err) = rename_to_backup(path) {
-                            assert!(path.exists(), "we would leave the local_layer without a file if this does not hold: {}", path.display());
                             return Err(err.context("rename to backup"));
-                        } else if let Some(actual) = reason.actual_size() {
+                        } else if let Some(actual) = reason.as_ref().and_then(|r| r.actual_size()) {
+                            // previously added in `load_layer_map`
                             self.metrics.resident_physical_size_gauge.sub(actual);
                         }
+                    } else if let Some(reason) = reason {
+                        // just sanity checking myself
+                        assert!(reason.is_not_found());
+                    } else {
+                        assert_eq!(
+                            path.try_exists().unwrap_err().kind(),
+                            std::io::ErrorKind::NotFound
+                        );
                     }
+                    // this is of course really bad design-wise, someone could already access the
+                    // layer but not really, because all places should wait for timeline to
+                    // activate. will be fixed in upcoming PR, so we never add any layers before we
+                    // know the layers we are going to add are good.
                     corrupted_local_layers.push(local_layer);
                     // fall-through to adding the remote layer
                 } else {
@@ -1615,7 +1634,7 @@ impl Timeline {
                 }
             }
         }
-        guard.initialize_remote_layers(added_remote_layers);
+        guard.initialize_remote_layers(corrupted_local_layers, added_remote_layers);
         Ok(local_only_layers)
     }
 
