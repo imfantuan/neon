@@ -581,6 +581,26 @@ RUN wget https://gitlab.com/dalibo/postgresql_anonymizer/-/archive/1.1.0/postgre
 
 #########################################################################################
 #
+# Layer "pg-partman-pg-build"
+# compile pg-partman extension
+#
+#########################################################################################
+FROM build-deps AS pg-partman-pg-build
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+
+ENV PATH "/usr/local/pgsql/bin/:$PATH"
+RUN wget https://github.com/pgpartman/pg_partman/archive/master.tar.gz -O pgpartman.tar.gz &&\
+    mkdir pg_partman-src && cd pg_partman-src && tar xvzf ../pgpartman.tar.gz --strip-components=1 -C . && \
+    find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /before.txt &&\
+    make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_partman.control && \
+    find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /after.txt &&\
+    mkdir -p /extensions/pg_partman && cp /usr/local/pgsql/share/extension/pg_partman.control /extensions/pg_partman && \
+    sort -o /before.txt /before.txt && sort -o /after.txt /after.txt && \
+    comm -13 /before.txt /after.txt | tar --directory=/usr/local/pgsql --zstd -cf /extensions/pg_partman.tar.zst -T -
+
+#########################################################################################
+#
 # Layer "rust extensions"
 # This layer is used to build `pgx` deps
 #
@@ -777,6 +797,7 @@ RUN apt update && apt install -y zstd
 # copy the control files here
 COPY --from=kq-imcx-pg-build /extensions/ /extensions/
 COPY --from=pg-anon-pg-build /extensions/ /extensions/
+COPY --from=pg-partman-pg-build /extensions/ /extensions/
 COPY --from=postgis-build /extensions/ /extensions/
 COPY scripts/combine_control_files.py ./combine_control_files.py
 RUN python3 ./combine_control_files.py ${PG_VERSION} ${BUILD_TAG} --public_extensions="anon,postgis"
