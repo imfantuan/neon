@@ -1234,7 +1234,7 @@ fn make_desc(
             timeline_id,
             i.key_range.to_owned(),
             i.lsn,
-            true,
+            false,
             file_size,
         ),
         LayerFileName::Delta(d) => PersistentLayerDesc::new_delta(
