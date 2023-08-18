@@ -1093,6 +1093,39 @@ async fn timeline_download_remote_layers_handler_get(
     json_response(StatusCode::OK, info)
 }
 
+/// Try if `GetPage@Lsn` is successful, useful for manual debugging.
+async fn try_timeline_get_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    struct Key(crate::repository::Key);
+
+    impl std::str::FromStr for Key {
+        type Err = anyhow::Error;
+
+        fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+            crate::repository::Key::from_hex(s).map(Key)
+        }
+    }
+
+    let key: Option<Key> = parse_query_param(&request, "key")?;
+    let lsn: Option<Lsn> = parse_query_param(&request, "lsn")?;
+
+    async {
+        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+        let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
+
+        timeline.get(key.unwrap().0, lsn.unwrap(), &ctx).await?;
+        json_response(StatusCode::OK, ())
+    }
+    .instrument(info_span!("timeline_get", %tenant_id, %timeline_id))
+    .await
+}
+
 async fn active_timeline_of_active_tenant(
     tenant_id: TenantId,
     timeline_id: TimelineId,
@@ -1445,6 +1478,13 @@ pub fn make_router(
         .get("/v1/panic", |r| api_handler(r, always_panic_handler))
         .post("/v1/tracing/event", |r| {
             testing_api_handler("emit a tracing event", r, post_tracing_event_handler)
+        })
+        .get("/v1/tenant/:tenant_id/timeline/:timeline_id/get", |r| {
+            testing_api_handler(
+                "check if page at lsn is successful",
+                r,
+                try_timeline_get_handler,
+            )
         })
         .any(handler_404))
 }
