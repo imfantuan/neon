@@ -1040,14 +1040,13 @@ impl Timeline {
         let Some(layer) = self.find_layer(layer_file_name).await else {
             return Ok(None);
         };
-        let Some(remote_layer) = layer.downcast_remote_layer() else {
-            return Ok(Some(false));
-        };
+
         if self.remote_client.is_none() {
             return Ok(Some(false));
         }
 
-        self.download_remote_layer(remote_layer).await?;
+        layer.guard_against_eviction(true).await?;
+
         Ok(Some(true))
     }
 
@@ -1057,6 +1056,9 @@ impl Timeline {
         let Some(local_layer) = self.find_layer(layer_file_name).await else {
             return Ok(None);
         };
+
+        let Ok(local_layer) = local_layer.guard_against_eviction(false).await else { return Ok(Some(false)); };
+
         let remote_client = self
             .remote_client
             .as_ref()
@@ -1064,7 +1066,7 @@ impl Timeline {
 
         let cancel = CancellationToken::new();
         let results = self
-            .evict_layer_batch(remote_client, &[local_layer], cancel)
+            .evict_layer_batch(remote_client, &[local_layer], &cancel)
             .await?;
         assert_eq!(results.len(), 1);
         let result: Option<Result<(), EvictionError>> = results.into_iter().next().unwrap();
@@ -1083,14 +1085,14 @@ impl Timeline {
     pub(crate) async fn evict_layers(
         &self,
         _: &GenericRemoteStorage,
-        layers_to_evict: &[Arc<dyn PersistentLayer>],
+        layers_to_evict: &[ResidentLayer],
         cancel: CancellationToken,
     ) -> anyhow::Result<Vec<Option<Result<(), EvictionError>>>> {
-        let remote_client = self.remote_client.clone().expect(
+        let remote_client = self.remote_client.as_ref().expect(
             "GenericRemoteStorage is configured, so timeline must have RemoteTimelineClient",
         );
 
-        self.evict_layer_batch(&remote_client, layers_to_evict, cancel)
+        self.evict_layer_batch(remote_client, layers_to_evict, &cancel)
             .await
     }
 
@@ -1118,8 +1120,8 @@ impl Timeline {
     async fn evict_layer_batch(
         &self,
         remote_client: &Arc<RemoteTimelineClient>,
-        layers_to_evict: &[Arc<dyn PersistentLayer>],
-        cancel: CancellationToken,
+        layers_to_evict: &[ResidentLayer],
+        _cancel: &CancellationToken,
     ) -> anyhow::Result<Vec<Option<Result<(), EvictionError>>>> {
         // ensure that the layers have finished uploading
         // (don't hold the layer_removal_cs while we do it, we're not removing anything yet)
@@ -1141,125 +1143,17 @@ impl Timeline {
         }
 
         // start the batch update
-        let mut guard = self.layers.write().await;
         let mut results = Vec::with_capacity(layers_to_evict.len());
 
-        for l in layers_to_evict.iter() {
-            let res = if cancel.is_cancelled() {
-                None
-            } else {
-                Some(self.evict_layer_batch_impl(&layer_removal_guard, l, &mut guard))
-            };
-            results.push(res);
+        for l in layers_to_evict {
+            results.push(Some(l.evict(&remote_client).await));
         }
 
         // commit the updates & release locks
-        drop_wlock(guard);
         drop(layer_removal_guard);
 
         assert_eq!(results.len(), layers_to_evict.len());
         Ok(results)
-    }
-
-    fn evict_layer_batch_impl(
-        &self,
-        _layer_removal_cs: &tokio::sync::MutexGuard<'_, ()>,
-        local_layer: &Arc<dyn PersistentLayer>,
-        layer_mgr: &mut LayerManager,
-    ) -> Result<(), EvictionError> {
-        if local_layer.is_remote_layer() {
-            return Err(EvictionError::CannotEvictRemoteLayer);
-        }
-
-        let layer_file_size = local_layer.layer_desc().file_size;
-
-        let local_layer_mtime = local_layer
-            .local_path()
-            .expect("local layer should have a local path")
-            .metadata()
-            // when the eviction fails because we have already deleted the layer in compaction for
-            // example, a NotFound error bubbles up from here.
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    EvictionError::FileNotFound
-                } else {
-                    EvictionError::StatFailed(e)
-                }
-            })?
-            .modified()
-            .map_err(EvictionError::StatFailed)?;
-
-        let local_layer_residence_duration =
-            match SystemTime::now().duration_since(local_layer_mtime) {
-                Err(e) => {
-                    warn!(layer = %local_layer, "layer mtime is in the future: {}", e);
-                    None
-                }
-                Ok(delta) => Some(delta),
-            };
-
-        let layer_metadata = LayerFileMetadata::new(layer_file_size);
-
-        let new_remote_layer = Arc::new(match local_layer.filename() {
-            LayerFileName::Image(image_name) => RemoteLayer::new_img(
-                self.tenant_id,
-                self.timeline_id,
-                &image_name,
-                &layer_metadata,
-                local_layer
-                    .access_stats()
-                    .clone_for_residence_change(layer_mgr, LayerResidenceStatus::Evicted),
-            ),
-            LayerFileName::Delta(delta_name) => RemoteLayer::new_delta(
-                self.tenant_id,
-                self.timeline_id,
-                &delta_name,
-                &layer_metadata,
-                local_layer
-                    .access_stats()
-                    .clone_for_residence_change(layer_mgr, LayerResidenceStatus::Evicted),
-            ),
-        });
-
-        assert_eq!(local_layer.layer_desc(), new_remote_layer.layer_desc());
-
-        layer_mgr
-            .replace_and_verify(local_layer.clone(), new_remote_layer)
-            .map_err(EvictionError::LayerNotFound)?;
-
-        if let Err(e) = local_layer.delete_resident_layer_file() {
-            // this should never happen, because of layer_removal_cs usage and above stat
-            // access for mtime
-            error!("failed to remove layer file on evict after replacement: {e:#?}");
-        }
-        // Always decrement the physical size gauge, even if we failed to delete the file.
-        // Rationale: we already replaced the layer with a remote layer in the layer map,
-        // and any subsequent download_remote_layer will
-        // 1. overwrite the file on disk and
-        // 2. add the downloaded size to the resident size gauge.
-        //
-        // If there is no re-download, and we restart the pageserver, then load_layer_map
-        // will treat the file as a local layer again, count it towards resident size,
-        // and it'll be like the layer removal never happened.
-        // The bump in resident size is perhaps unexpected but overall a robust behavior.
-        self.metrics
-            .resident_physical_size_gauge
-            .sub(layer_file_size);
-
-        self.metrics.evictions.inc();
-
-        if let Some(delta) = local_layer_residence_duration {
-            self.metrics
-                .evictions_with_low_residence_duration
-                .read()
-                .unwrap()
-                .observe(delta);
-            info!(layer=%local_layer, residence_millis=delta.as_millis(), "evicted layer after known residence period");
-        } else {
-            info!(layer=%local_layer, "evicted layer after unknown residence period");
-        }
-
-        Ok(())
     }
 }
 
@@ -2245,7 +2139,7 @@ impl Timeline {
         }
     }
 
-    async fn find_layer(&self, layer_file_name: &str) -> Option<Arc<dyn PersistentLayer>> {
+    async fn find_layer(&self, layer_file_name: &str) -> Option<Arc<LayerE>> {
         let guard = self.layers.read().await;
         for historic_layer in guard.layer_map().iter_historic_layers() {
             let historic_layer_name = historic_layer.filename().file_name();
@@ -4657,7 +4551,7 @@ pub struct DiskUsageEvictionInfo {
 }
 
 pub struct LocalLayerInfoForDiskUsageEviction {
-    pub layer: Arc<dyn PersistentLayer>,
+    pub layer: ResidentLayer,
     pub last_activity_ts: SystemTime,
 }
 
@@ -4667,8 +4561,14 @@ impl std::fmt::Debug for LocalLayerInfoForDiskUsageEviction {
         // having to allocate a string to this is bad, but it will rarely be formatted
         let ts = chrono::DateTime::<chrono::Utc>::from(self.last_activity_ts);
         let ts = ts.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+        struct DisplayIsDebug<'a, T>(&'a T);
+        impl<'a, T: std::fmt::Display> std::fmt::Debug for DisplayIsDebug<'a, T> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
         f.debug_struct("LocalLayerInfoForDiskUsageEviction")
-            .field("layer", &self.layer)
+            .field("layer", &DisplayIsDebug(&self.layer))
             .field("last_activity", &ts)
             .finish()
     }
@@ -4695,9 +4595,7 @@ impl Timeline {
 
             let l = guard.get_from_desc(&l);
 
-            if l.is_remote_layer() {
-                continue;
-            }
+            let Ok(l) = l.guard_against_eviction(false).await else { continue; };
 
             let last_activity_ts = l.access_stats().latest_activity().unwrap_or_else(|| {
                 // We only use this fallback if there's an implementation error.

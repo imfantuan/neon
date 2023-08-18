@@ -194,15 +194,16 @@ impl Timeline {
         // NB: all the checks can be invalidated as soon as we release the layer map lock.
         // We don't want to hold the layer map lock during eviction.
         // So, we just need to deal with this.
-        let candidates: Vec<Arc<dyn PersistentLayer>> = {
+        let candidates: Vec<_> = {
             let guard = self.layers.read().await;
             let layers = guard.layer_map();
             let mut candidates = Vec::new();
             for hist_layer in layers.iter_historic_layers() {
                 let hist_layer = guard.get_from_desc(&hist_layer);
-                if hist_layer.is_remote_layer() {
-                    continue;
-                }
+
+                // funny: this is the best way to get local layers is to lock them into
+                // memory for the duration of eviction
+                let Ok(guard) = hist_layer.guard_against_eviction(false).await else { continue; };
 
                 let last_activity_ts = hist_layer.access_stats().latest_activity().unwrap_or_else(|| {
                     // We only use this fallback if there's an implementation error.
@@ -233,7 +234,7 @@ impl Timeline {
                     }
                 };
                 if no_activity_for > p.threshold {
-                    candidates.push(hist_layer)
+                    candidates.push(guard)
                 }
             }
             candidates
@@ -252,7 +253,7 @@ impl Timeline {
         };
 
         let results = match self
-            .evict_layer_batch(remote_client, &candidates[..], cancel.clone())
+            .evict_layer_batch(remote_client, &candidates[..], &cancel)
             .await
         {
             Err(pre_err) => {
