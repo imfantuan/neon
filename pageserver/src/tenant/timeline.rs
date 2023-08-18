@@ -1146,7 +1146,7 @@ impl Timeline {
         let mut results = Vec::with_capacity(layers_to_evict.len());
 
         for l in layers_to_evict {
-            results.push(Some(l.evict(&remote_client).await));
+            results.push(Some(l.evict(&remote_client).await.map(|_| ())));
         }
 
         // commit the updates & release locks
