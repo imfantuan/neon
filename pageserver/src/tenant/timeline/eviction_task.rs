@@ -272,7 +272,7 @@ impl Timeline {
                 Some(Ok(())) => {
                     stats.evicted += 1;
                 }
-                Some(Err(EvictionError::FileNotFound)) => {
+                Some(Err(EvictionError::NotFound | EvictionError::Downloaded)) => {
                     // compaction/gc removed the file while we were waiting on layer_removal_cs
                     stats.not_evictable += 1;
                 }

@@ -997,9 +997,8 @@ impl Timeline {
     /// [witness_article]: https://willcrichton.net/rust-api-type-patterns/witnesses.html
     pub(crate) async fn evict_layers(
         &self,
-        _: &GenericRemoteStorage,
         layers_to_evict: &[Arc<LayerE>],
-        cancel: CancellationToken,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<Vec<Option<Result<(), EvictionError>>>> {
         let remote_client = self.remote_client.as_ref().expect(
             "GenericRemoteStorage is configured, so timeline must have RemoteTimelineClient",
@@ -1027,7 +1026,7 @@ impl Timeline {
         &self,
         remote_client: &Arc<RemoteTimelineClient>,
         layers_to_evict: &[Arc<LayerE>],
-        _cancel: &CancellationToken,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<Vec<Option<Result<(), EvictionError>>>> {
         // ensure that the layers have finished uploading
         // (don't hold the layer_removal_cs while we do it, we're not removing anything yet)
@@ -1037,7 +1036,7 @@ impl Timeline {
             .context("wait for layer upload ops to complete")?;
 
         // now lock out layer removal (compaction, gc, timeline deletion)
-        let layer_removal_guard = self.layer_removal_cs.lock().await;
+        let _layer_removal_guard = self.layer_removal_cs.lock().await;
 
         {
             // to avoid racing with detach and delete_timeline
@@ -1050,13 +1049,34 @@ impl Timeline {
 
         // start the batch update
         let mut results = Vec::with_capacity(layers_to_evict.len());
-
-        for l in layers_to_evict {
-            results.push(Some(l.evict(remote_client).await.map(|_| ())));
+        for _ in 0..layers_to_evict.len() {
+            results.push(None);
         }
 
-        // commit the updates & release locks
-        drop(layer_removal_guard);
+        let mut js = tokio::task::JoinSet::new();
+
+        for (i, l) in layers_to_evict.into_iter().enumerate() {
+            js.spawn({
+                let l = l.to_owned();
+                async move { (i, l.evict_and_wait().await) }
+            });
+        }
+
+        let join = async {
+            while let Some(next) = js.join_next().await {
+                match next {
+                    Ok((i, res)) => results[i] = Some(res),
+                    Err(je) if je.is_cancelled() => unreachable!("not used"),
+                    Err(je) if je.is_panic() => { /* already logged */ }
+                    Err(je) => tracing::error!("unknown JoinError: {je:?}"),
+                }
+            }
+        };
+
+        tokio::select! {
+            _ = cancel.cancelled() => {},
+            _ = join => {}
+        }
 
         assert_eq!(results.len(), layers_to_evict.len());
         Ok(results)
@@ -1065,10 +1085,12 @@ impl Timeline {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum EvictionError {
-    /// Most likely the to-be evicted layer has been deleted by compaction or gc which use the same
-    /// locks, so they got to execute before the eviction.
-    #[error("file backing the layer has been removed already")]
-    FileNotFound,
+    #[error("layer was already evicted")]
+    NotFound,
+
+    /// Evictions must always lose to downloads in races, and this time it happened.
+    #[error("layer was downloaded instead")]
+    Downloaded,
 }
 
 /// Number of times we will compute partition within a checkpoint distance.
