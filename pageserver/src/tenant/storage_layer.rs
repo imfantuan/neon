@@ -547,34 +547,13 @@ impl LayerE {
         })
     }
 
-    /// Evict the the layer file as soon as possible, but then allow redownloads to happen.
-    pub(crate) async fn evict(
+    pub(crate) async fn evict_and_wait(
         &self,
         _: &RemoteTimelineClient,
-    ) -> Result<bool, super::timeline::EvictionError> {
-        assert!(
-            self.have_remote_client,
-            "refusing to evict without a remote timeline client"
-        );
-        self.wanted_evicted.store(true, Ordering::Release);
-
-        let Some(guard) = self.inner.get() else {
-            // we don't need to wait around if there is a download ongoing, because that might reset the wanted_evicted
-            // however it's also possible that we are present and just accessed by someone else.
-            return Err(super::timeline::EvictionError::NotFound);
-        };
-
-        // now, this might immediatedly cause the drop fn to run, but that'll only act on
-        // background
-        Ok(
-            Self::get_or_apply_evictedness(Some(guard), &self.wanted_evicted)
-                .map(|_strong| false)
-                .unwrap_or(true),
-        )
-    }
-
-    pub(crate) async fn evict_and_wait(&self) -> Result<(), super::timeline::EvictionError> {
+    ) -> Result<(), super::timeline::EvictionError> {
         use tokio::sync::broadcast::error::RecvError;
+
+        assert!(self.have_remote_client);
 
         self.wanted_evicted.store(true, Ordering::Release);
 
@@ -582,7 +561,7 @@ impl LayerE {
 
         // why call get instead of looking at the watch? because get will downgrade any
         // Arc<_> it finds, because we set the wanted_evicted
-        if dbg!(self.get()).is_none() {
+        if self.get().is_none() {
             // it was not evictable in the first place
             // our store to the wanted_evicted does not matter; it will be reset by next download
             return Err(super::timeline::EvictionError::NotFound);
@@ -1364,16 +1343,22 @@ mod heavier_once_cell {
             precheck()?;
 
             let permit = sem.acquire_owned().await;
-            if let Err(_) = permit {
+            if permit.is_err() {
                 let guard = self.inner.lock().unwrap();
-                assert!(guard.value.is_some());
+                assert!(
+                    guard.value.is_some(),
+                    "semaphore got closed, must be initialized"
+                );
                 return Ok(Guard(guard));
             } else {
                 // now we try
                 let value = factory().await?;
 
                 let mut guard = self.inner.lock().unwrap();
-                assert!(guard.value.is_none());
+                assert!(
+                    guard.value.is_none(),
+                    "we won permit, must not be initialized"
+                );
                 guard.value = Some(value);
                 guard.init_semaphore.close();
                 Ok(Guard(guard))
